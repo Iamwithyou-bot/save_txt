@@ -1,0 +1,213 @@
+New-Item -ItemType Directory -Force -Path .\tools | Out-Null
+@'
+#!/usr/bin/env python3
+import argparse, json, numpy as np, trimesh
+from pathlib import Path
+
+def approx_diameter(verts):
+    V = verts.astype(np.float64)
+    if len(V) == 0: return 0.0
+    import numpy as np
+    idx = np.random.choice(len(V), min(4096, len(V)), replace=False)
+    S = V[idx]
+    p = S[np.random.randint(len(S))]
+    for _ in range(2):
+        d = np.linalg.norm(S - p, axis=1)
+        p = S[np.argmax(d)]
+    q = S[np.argmax(np.linalg.norm(S - p, axis=1))]
+    return float(np.linalg.norm(p - q))
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("stl_path", type=Path)
+    ap.add_argument("--out_root", type=Path, required=True)  # ..\gigapose\datasets\myObject
+    ap.add_argument("--units", choices=["mm","m"], default="mm")
+    args = ap.parse_args()
+    scale = 0.001 if args.units == "mm" else 1.0
+
+    mesh = trimesh.load(args.stl_path, force='mesh')
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise ValueError("STL enthält keine einzelne Trimesh-Geometrie.")
+    mesh.remove_degenerate_faces()
+    mesh.remove_unreferenced_vertices()
+    mesh.merge_vertices()
+    mesh.rezero()
+    if scale != 1.0:
+        mesh.apply_scale(scale)  # -> Meter
+
+    out_models = args.out_root / "models"
+    out_models.mkdir(parents=True, exist_ok=True)
+    ply_path = out_models / "obj_000001.ply"
+    mesh.export(ply_path, file_type="ply")
+
+    V = mesh.vertices
+    mn, mx = V.min(axis=0), V.max(axis=0)
+    size = mx - mn
+    diam = approx_diameter(V)
+    models_info = {
+        "1": {
+            "name": "obj_000001",
+            "diameter": float(diam),
+            "min_x": float(mn[0]), "min_y": float(mn[1]), "min_z": float(mn[2]),
+            "size_x": float(size[0]), "size_y": float(size[1]), "size_z": float(size[2]),
+        }
+    }
+    (args.out_root / "models_info.json").write_text(json.dumps(models_info, indent=2))
+    print("Exportiert:", ply_path)
+    print("Größe [m]:", size.tolist(), "Durchmesser [m]:", diam)
+
+if __name__ == "__main__":
+    main()
+'@ | Set-Content -Path .\tools\stl2bop.py -Encoding UTF8
+
+
+
+4.1
+
+
+# Beispiel: Dein STL liegt in D:\assets\obj.stl
+python .\tools\stl2bop.py "D:\assets\dein_model.stl" `
+  --out_root "..\gigapose\datasets\myObject" `
+  --units mm
+
+
+5)
+
+Set-Location $HOME\novel-pose\gigapose
+..\envs\gigapose-venv\Scripts\python.exe -m src.scripts.render_custom_templates custom_dataset_name=myObject
+
+
+..\envs\gigapose-venv\Scripts\python.exe -m src.scripts.render_bop_templates test_dataset_name=myObject
+
+
+
+6)
+
+
+Set-Location $HOME\novel-pose\pose-live
+@'
+import os, json, time, subprocess, cv2, numpy as np
+from pathlib import Path
+
+def read_env(path):
+    env = {}
+    p = Path(path)
+    if p.exists():
+        for line in p.read_text().splitlines():
+            if not line.strip() or line.strip().startswith("#"): continue
+            k, _, v = line.partition("=")
+            env[k.strip()] = v.strip()
+    return env
+
+ENV = read_env(".env")
+GIGAPOSE_ROOT = Path(ENV.get("GIGAPOSE_ROOT","..\\gigapose")).resolve()
+CNOS_ROOT     = Path(ENV.get("CNOS_ROOT","..\\cnos")).resolve()
+GIGAPOSE_PY   = str(Path(ENV.get("GIGAPOSE_PY","..\\envs\\gigapose-venv\\Scripts\\python.exe")).resolve())
+CNOS_PY       = str(Path(ENV.get("CNOS_PY","..\\envs\\cnos-venv\\Scripts\\python.exe")).resolve())
+DATASET       = ENV.get("DATASET","myObject")
+
+# TODO: echte Kalibrierung eintragen:
+fx, fy, cx, cy = 900.0, 900.0, 640.0, 360.0
+K = [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+OBJ_ID = 1
+
+def write_bop_single(root: Path, frame_bgr, img_id: int):
+    ds = root / "datasets" / DATASET
+    scene = ds / "test" / "000000"
+    rgbdir = scene / "rgb"
+    rgbdir.mkdir(parents=True, exist_ok=True)
+    img_fn = f"{img_id:06d}.png"
+    cv2.imwrite(str(rgbdir / img_fn), frame_bgr)
+    (scene / "scene_camera.json").write_text(json.dumps({f"{img_id}":{"cam_K": K, "depth_scale":1.0}}))
+    (ds / "test_targets_bop19.json").write_text(json.dumps([{"im_id": img_id, "obj_id": OBJ_ID, "scene_id": 0}]))
+    return rgbdir / img_fn
+
+def run_gigapose_coarse():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(GIGAPOSE_ROOT)
+    subprocess.run(
+        [GIGAPOSE_PY, "test.py", f"test_dataset_name={DATASET}", "run_id=live", "test_setting=detection"],
+        cwd=str(GIGAPOSE_ROOT), env=env, check=True
+    )
+
+def draw_axes(img, R, t, Kmat, axis_len=0.05):
+    rvec, _ = cv2.Rodrigues(R.astype(np.float64))
+    axes = np.float32([[0,0,0],[axis_len,0,0],[0,axis_len,0],[0,0,axis_len]])
+    proj, _ = cv2.projectPoints(axes, rvec, t.reshape(3,1), Kmat, None)
+    p0, px, py, pz = proj.reshape(-1,2).astype(int)
+    cv2.line(img, tuple(p0), tuple(px),  (0,0,255), 2)
+    cv2.line(img, tuple(p0), tuple(py),  (0,255,0), 2)
+    cv2.line(img, tuple(p0), tuple(pz),  (255,0,0), 2)
+
+def latest_prediction_csv():
+    out = GIGAPOSE_ROOT / "output"
+    if not out.exists(): return None
+    cand = sorted(out.rglob("predictions.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return cand[0] if cand else None
+
+def parse_first_pose(csv_path):
+    import csv
+    with open(csv_path) as f:
+        for row in csv.reader(f, delimiter=','):
+            R = np.array(list(map(float, row[4:13]))).reshape(3,3)
+            t = np.array(list(map(float, row[13:16])))
+            score = float(row[3])
+            return R, t, score
+    return None
+
+def main():
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # DirectShow hilft oft unter Windows
+    Kmat = np.array([[fx,0,cx],[0,fy,cy],[0,0,1]], dtype=np.float64)
+    i = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok: break
+        cv2.imshow("Live", frame)
+        key = cv2.waitKey(1) & 0xFF
+
+        if i % 10 == 0 or key == ord('p'):
+            _ = write_bop_single(GIGAPOSE_ROOT, frame, i)
+            t0 = time.time()
+            run_gigapose_coarse()
+            dt = time.time() - t0
+            csv_path = latest_prediction_csv()
+            if csv_path:
+                pose = parse_first_pose(csv_path)
+                if pose:
+                    R, t, score = pose
+                    vis = frame.copy()
+                    draw_axes(vis, R, t, Kmat, axis_len=0.05)
+                    cv2.putText(vis, f"score={score:.3f}  {dt*1000:.0f} ms", (10,30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 2, cv2.LINE_AA)
+                    cv2.imshow("Pose", vis)
+
+        if key == 27: break  # ESC
+        i += 1
+
+    cap.release(); cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
+'@ | Set-Content -Path .\live_gigapose.py -Encoding UTF8
+
+
+
+
+
+# Beispiel-Aufruf (PowerShell), äquivalent im Python per subprocess:
+..\envs\cnos-venv\Scripts\python.exe -m src.scripts.inference_custom `
+  --template_dir "$PWD\tmp\cnos_templates" `
+  --rgb_path "<PFAD_ZUM_BILD>" `
+  --stability_score_thresh 0.5
+
+
+
+7)
+
+
+# (falls nicht aktiv) Wrapper-venv aktivieren
+Set-Location $HOME\novel-pose\pose-live
+.\.venv\Scripts\Activate.ps1
+
+# Live starten
+python .\live_gigapose.py
