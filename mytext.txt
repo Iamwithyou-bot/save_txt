@@ -1,13 +1,12 @@
-New-Item -ItemType Directory -Force -Path .\tools | Out-Null
-@'
+# tools/stl2bop.py
 #!/usr/bin/env python3
 import argparse, json, numpy as np, trimesh
 from pathlib import Path
 
-def approx_diameter(verts):
+def approx_diameter(verts: np.ndarray) -> float:
     V = verts.astype(np.float64)
-    if len(V) == 0: return 0.0
-    import numpy as np
+    if V.size == 0:
+        return 0.0
     idx = np.random.choice(len(V), min(4096, len(V)), replace=False)
     S = V[idx]
     p = S[np.random.randint(len(S))]
@@ -17,29 +16,61 @@ def approx_diameter(verts):
     q = S[np.argmax(np.linalg.norm(S - p, axis=1))]
     return float(np.linalg.norm(p - q))
 
+def remove_degenerate_and_duplicates(mesh: trimesh.Trimesh):
+    # 1) Degenerate Faces -> update_faces(nondegenerate_faces)
+    nd = mesh.nondegenerate_faces()
+    if getattr(nd, "dtype", None) is not bool:   # indices -> bool mask
+        mask = np.zeros(len(mesh.faces), dtype=bool)
+        mask[nd] = True
+    else:
+        mask = nd
+    mesh.update_faces(mask)
+
+    # 2) Doppelte Faces optional entfernen
+    try:
+        uniq = mesh.unique_faces()  # bool mask
+        if len(uniq) == len(mesh.faces):
+            mesh.update_faces(uniq)
+    except Exception:
+        pass
+
+    # 3) Verwaiste Vertices entfernen
+    mesh.remove_unreferenced_vertices()
+
+    # 4) (Optional) Nahe Vertices mergen
+    try:
+        mesh.merge_vertices()  # toleranzbasiert; ok zu behalten
+    except Exception:
+        pass
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stl_path", type=Path)
     ap.add_argument("--out_root", type=Path, required=True)  # ..\gigapose\datasets\myObject
-    ap.add_argument("--units", choices=["mm","m"], default="mm")
+    ap.add_argument("--units", choices=["mm","m"], default="mm",
+                    help="STL hat keine Einheiten; meistens mm. 'mm' -> Skaliert ×0.001 auf Meter.")
     args = ap.parse_args()
-    scale = 0.001 if args.units == "mm" else 1.0
 
+    scale = 0.001 if args.units == "mm" else 1.0
     mesh = trimesh.load(args.stl_path, force='mesh')
     if not isinstance(mesh, trimesh.Trimesh):
         raise ValueError("STL enthält keine einzelne Trimesh-Geometrie.")
-    mesh.remove_degenerate_faces()
-    mesh.remove_unreferenced_vertices()
-    mesh.merge_vertices()
+
+    # Grundreinigung + Normierung
+    remove_degenerate_and_duplicates(mesh)
     mesh.rezero()
     if scale != 1.0:
         mesh.apply_scale(scale)  # -> Meter
 
+    # Exportpfade
     out_models = args.out_root / "models"
     out_models.mkdir(parents=True, exist_ok=True)
     ply_path = out_models / "obj_000001.ply"
+
+    # Export (PLY binär, mit Normals)
     mesh.export(ply_path, file_type="ply")
 
+    # models_info.json schreiben (Meter)
     V = mesh.vertices
     mn, mx = V.min(axis=0), V.max(axis=0)
     size = mx - mn
@@ -52,15 +83,13 @@ def main():
             "size_x": float(size[0]), "size_y": float(size[1]), "size_z": float(size[2]),
         }
     }
-    (args.out_root / "models_info.json").write_text(json.dumps(models_info, indent=2))
+    (args.out_root / "models_info.json").write_text(json.dumps(models_info, indent=2), encoding="utf-8")
+
     print("Exportiert:", ply_path)
     print("Größe [m]:", size.tolist(), "Durchmesser [m]:", diam)
 
 if __name__ == "__main__":
     main()
-'@ | Set-Content -Path .\tools\stl2bop.py -Encoding UTF8
-
-
 
 4.1
 
