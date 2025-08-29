@@ -17,5 +17,12 @@ Set-Location $HOME\novel-pose\pose-live
 # Live starten
 python .\live_gigapose.py
 
-
-& "..\envs\gigapose-venv\Scripts\python.exe" -c "import os; from panda3d.core import getModelPath; print('CWD:', os.getcwd()); print('Model path:'); print(''.join(' - '+str(d)+'`n' for d in getModelPath().getDirectories()))"
+$code = @'
+import os
+from panda3d.core import getModelPath
+print("CWD:", os.getcwd())
+print("Model path:")
+for d in getModelPath().getDirectories():
+    print(" -", d)
+'@
+$code | & "..\envs\gigapose-venv\Scripts\python.exe" -
