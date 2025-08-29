@@ -1,65 +1,84 @@
+import os
 import numpy as np, trimesh, pyrender, imageio
 from pathlib import Path
 
+# ---------- Pfade ----------
 DATASET = "myObject"
 root = Path(__file__).resolve().parent
 ply   = root / "gigaPose_datasets" / "datasets" / DATASET / "models" / "obj_000001.ply"
 poses = root / "gigaPose_datasets" / "datasets" / "templates" / DATASET / "object_poses" / "000001.npy"
 out   = (root / "tmp" / "cnos_templates" / DATASET); out.mkdir(parents=True, exist_ok=True)
 
-# --- Laden ---
+# ---------- Laden ----------
 mesh_tm = trimesh.load(ply, force='mesh')
+T_co = np.load(poses)  # (N,4,4) object->camera (OpenCV)
+print("Mesh extents:", mesh_tm.extents, "verts:", len(mesh_tm.vertices), "poses:", len(T_co))
+
+# ---------- Szene ----------
+scene = pyrender.Scene(bg_color=[20,20,20,255], ambient_light=[0.4,0.4,0.4,1.0])
 mesh_pr = pyrender.Mesh.from_trimesh(mesh_tm, smooth=False)
-
-# Backface-Culling aus (wichtig falls Normals/Orientierung „komisch“)
-for prim in mesh_pr.primitives:
-    prim.cull_face = None
-
-# Dunkler Hintergrund, starke Beleuchtung
-scene = pyrender.Scene(bg_color=[30,30,30,255], ambient_light=[0.2,0.2,0.2,1.0])
+for prim in mesh_pr.primitives: prim.cull_face = None  # kein Backface-Culling
 scene.add(mesh_pr)
 
-w = h = 512
+w = h = 640
 fx = fy = 900.0
 cx = w/2; cy = h/2
-cam = pyrender.IntrinsicsCamera(fx, fy, cx, cy, znear=0.01, zfar=10_000.0)
+cam = pyrender.IntrinsicsCamera(fx, fy, cx, cy, znear=1e-5, zfar=1e5)
 renderer = pyrender.OffscreenRenderer(w, h)
-light = pyrender.DirectionalLight(intensity=5.0)
+light = pyrender.DirectionalLight(intensity=7.0)
 
-# Extrinsics laden (object -> camera, OpenCV-Konvention)
-T_co = np.load(poses)  # (N,4,4)
+# ---------- Hilfen ----------
+C = np.diag([1,-1,-1,1])     # OpenCV -> OpenGL Flip
+def save_pair(img, depth, path_stem: Path):
+    # Tiefen-Normalisierung (Inf bleibt weiß)
+    d = depth.copy()
+    mask = np.isfinite(d)
+    if mask.any():
+        dmin, dmax = d[mask].min(), d[mask].max()
+        dn = np.zeros_like(d, dtype=np.float32)
+        if dmax > dmin: dn[mask] = (d[mask]-dmin)/(dmax-dmin)
+        depth_vis = (255*(1.0-dn)).astype(np.uint8)
+    else:
+        depth_vis = np.full(d.shape, 255, np.uint8)
+    imageio.v2.imwrite(str(path_stem)+".png", img)
+    imageio.v2.imwrite(str(path_stem)+"_depth.png", depth_vis)
 
-# OpenCV -> OpenGL Achsumklappung (x, y, z) -> (x, -y, -z)
-C = np.diag([1, -1, -1, 1])
+def look_at(z_dist):
+    """Sanity-Kamera vor dem Objekt auf +Z, blickt zur Herkunft."""
+    T = np.eye(4); T[:3,3] = [0,0,z_dist]
+    # Pyrender erwartet camera->world; so blickt die Cam entlang -Z auf den Ursprung
+    return T
 
-saved = 0
-dbg_written = False
-for i, T in enumerate(T_co):
-    # Kamera-Pose in Welt (Welt = Objektkoords): T_cw = inv(T_co)
-    T_cw_cv  = np.linalg.inv(T)
-    # nach OpenGL konvertieren (Pose gilt in PyRender als camera->world)
-    T_cw_gl  = T_cw_cv @ C
+# ---------- Sanity-Shot: feste Kamera ----------
+z = float(max(mesh_tm.extents)*3.0 + 0.1)
+cn = scene.add(cam, pose=look_at(z))
+ln = scene.add(light, pose=look_at(z))
+color, depth = renderer.render(scene)
+save_pair(color, depth, out / "_sanity_fixed")
+scene.remove_node(cn); scene.remove_node(ln)
+print("Wrote sanity:", out/"_sanity_fixed.png")
 
-    cn = scene.add(cam,   pose=T_cw_gl)
-    ln = scene.add(light, pose=T_cw_gl)
-    color, depth = renderer.render(scene)
+# ---------- Varianten testen ----------
+variants = [
+    ("v0_Twc",            lambda Tco: np.linalg.inv(Tco)),
+    ("v1_Twc_atC_right",  lambda Tco: np.linalg.inv(Tco) @ C),
+    ("v2_Twc_atC_left",   lambda Tco: C @ np.linalg.inv(Tco)),
+    ("v3_Twc_sandwich",   lambda Tco: C @ np.linalg.inv(Tco) @ C),
+]
 
-    # einfache Sichtbarkeitsprüfung (nicht-Background-Pixel)
-    if not dbg_written:
-        # Depth normalisiert speichern (nur 1x zur Kontrolle)
-        d = depth.copy()
-        finite = np.isfinite(d)
-        if finite.any():
-            dmin, dmax = d[finite].min(), d[finite].max()
-            dn = np.zeros_like(d, dtype=np.float32)
-            if dmax > dmin:
-                dn[finite] = (d[finite]-dmin)/(dmax-dmin)
-            imageio.v2.imwrite(out / f"_debug_depth.png", (255*(1.0-dn)).astype(np.uint8))
-        imageio.v2.imwrite(out / f"_debug_color.png", color)
-        dbg_written = True
+N = min(6, len(T_co))  # nur einige Debug-Frames
+for name, fn in variants:
+    var_dir = out / f"_debug_{name}"
+    var_dir.mkdir(parents=True, exist_ok=True)
+    wrote_any = False
+    for i in range(N):
+        T = fn(T_co[i])
+        cn = scene.add(cam,   pose=T)
+        ln = scene.add(light, pose=T)
+        color, depth = renderer.render(scene)
+        save_pair(color, depth, var_dir / f"tpl_{i:03d}")
+        scene.remove_node(cn); scene.remove_node(ln)
+        wrote_any = True
+    if wrote_any: print("Wrote", N, "frames to", var_dir)
 
-    imageio.v2.imwrite(out / f"tpl_{i:03d}.png", color)
-    scene.remove_node(cn); scene.remove_node(ln)
-    saved += 1
-
-print(f"Saved {saved} templates to {out}")
+print("Done. Inspect folders starting with _debug_... and the _sanity_fixed.png.")
