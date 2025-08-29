@@ -17,15 +17,10 @@ Set-Location $HOME\novel-pose\pose-live
 # Live starten
 python .\live_gigapose.py
 
-# --- Panda3D model-path fix (Windows/relative Pfade) ---
-from pathlib import Path
-from panda3d.core import loadPrcFileData, Filename, getModelPath
+    def toHomogeneousMatrix(self):
+        return self.M
 
-ROOT = Path(__file__).resolve().parents[2]  # .../gigapose
-for p in [ROOT, ROOT / "gigaPose_datasets", ROOT / "gigaPose_datasets" / "datasets"]:
-    mp = Filename.from_os_specific(str(p.resolve())).getFullpath()
-    loadPrcFileData('', f"model-path {mp}")
-# Optional: Debug
-# print("P3D model-path:\n", "\n".join(" - "+str(d) for d in getModelPath().getDirectories()))
-# -------------------------------------------------------
+    @property
+    def homogeneous(self):
+        return self.M
 
