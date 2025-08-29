@@ -243,15 +243,43 @@ python .\live_gigapose.py
 
 
 
-##############################
-..\envs\gigapose-venv\Scripts\python.exe - << 'PY'
-import os, json, glob
-base = os.path.join(os.getcwd(), "datasets","myObject")
-print("PLYs:", glob.glob(os.path.join(base,"models","obj_*.ply")))
-mi = os.path.join(base,"models_info.json")
-print("models_info exists:", os.path.exists(mi))
-if os.path.exists(mi):
-    d = json.load(open(mi,"r",encoding="utf-8"))
-    print("models_info keys:", list(d.keys()))
-PY
+8)
+
+import numpy as np
+
+class SE3:
+    def __init__(self, R=None, t=None, M=None):
+        if M is not None:
+            M = np.asarray(M, dtype=np.float64)
+            if M.shape != (4, 4):
+                raise ValueError("M must be 4x4")
+            self.M = M
+        else:
+            R = np.eye(3) if R is None else np.asarray(R, dtype=np.float64)
+            t = np.zeros(3) if t is None else np.asarray(t, dtype=np.float64)
+            self.M = np.eye(4, dtype=np.float64)
+            self.M[:3, :3] = R
+            self.M[:3, 3]  = t
+
+    @staticmethod
+    def Identity():
+        return SE3()
+
+    @staticmethod
+    def fromHomogeneousMatrix(M):
+        return SE3(M=M)
+
+    def inverse(self):
+        R = self.M[:3, :3]; t = self.M[:3, 3]
+        Minv = np.eye(4, dtype=np.float64)
+        Minv[:3, :3] = R.T
+        Minv[:3, 3]  = -R.T @ t
+        return SE3(M=Minv)
+
+    def __mul__(self, other):
+        return SE3(M=self.M @ other.M)
+
+    def translation(self): return self.M[:3, 3]
+    def rotation(self):    return self.M[:3, :3]
+    def toHomogeneousMatrix(self): return self.M
 
