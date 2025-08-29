@@ -1,58 +1,65 @@
-import os
 import numpy as np, trimesh, pyrender, imageio
 from pathlib import Path
 
 DATASET = "myObject"
 root = Path(__file__).resolve().parent
+ply   = root / "gigaPose_datasets" / "datasets" / DATASET / "models" / "obj_000001.ply"
+poses = root / "gigaPose_datasets" / "datasets" / "templates" / DATASET / "object_poses" / "000001.npy"
+out   = (root / "tmp" / "cnos_templates" / DATASET); out.mkdir(parents=True, exist_ok=True)
 
-# Kandidaten für PLY
-ply_candidates = [
-    root/"gigaPose_datasets/datasets"/DATASET/"models/obj_000001.ply",
-    root/"datasets"/DATASET/"models/obj_000001.ply",
-]
+# --- Laden ---
+mesh_tm = trimesh.load(ply, force='mesh')
+mesh_pr = pyrender.Mesh.from_trimesh(mesh_tm, smooth=False)
 
-# Kandidaten für object_poses
-poses_candidates = [
-    root/"gigaPose_datasets/datasets/templates"/DATASET/"object_poses/000001.npy",
-    root/"gigaPose_datasets/datasets"/DATASET/"templates"/DATASET/"object_poses/000001.npy",
-    root/"datasets/templates"/DATASET/"object_poses/000001.npy",
-    root/"datasets"/DATASET/"templates"/DATASET/"object_poses/000001.npy",
-]
+# Backface-Culling aus (wichtig falls Normals/Orientierung „komisch“)
+for prim in mesh_pr.primitives:
+    prim.cull_face = None
 
-def first_existing(paths):
-    for p in paths:
-        if p.exists():
-            return p
-    raise FileNotFoundError("None of these paths exist:\n" + "\n".join(str(p) for p in paths))
-
-ply   = first_existing(ply_candidates)
-poses = first_existing(poses_candidates)
-out   = (root/"tmp/cnos_templates"/DATASET); out.mkdir(parents=True, exist_ok=True)
-
-print("PLY  ->", ply)
-print("POSE ->", poses)
-print("OUT  ->", out)
-
-mesh = trimesh.load(ply, force='mesh')
-scene = pyrender.Scene(bg_color=[255,255,255,0], ambient_light=[0.4,0.4,0.4,1.0])
-scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=False))
+# Dunkler Hintergrund, starke Beleuchtung
+scene = pyrender.Scene(bg_color=[30,30,30,255], ambient_light=[0.2,0.2,0.2,1.0])
+scene.add(mesh_pr)
 
 w = h = 512
-fx = fy = 700.0; cx = cy = w/2
-cam = pyrender.IntrinsicsCamera(fx, fy, cx, cy)
+fx = fy = 900.0
+cx = w/2; cy = h/2
+cam = pyrender.IntrinsicsCamera(fx, fy, cx, cy, znear=0.01, zfar=10_000.0)
 renderer = pyrender.OffscreenRenderer(w, h)
-light = pyrender.DirectionalLight(intensity=3.0)
+light = pyrender.DirectionalLight(intensity=5.0)
 
-T_co = np.load(poses)  # (N,4,4) object->camera
-count = 0
+# Extrinsics laden (object -> camera, OpenCV-Konvention)
+T_co = np.load(poses)  # (N,4,4)
+
+# OpenCV -> OpenGL Achsumklappung (x, y, z) -> (x, -y, -z)
+C = np.diag([1, -1, -1, 1])
+
+saved = 0
+dbg_written = False
 for i, T in enumerate(T_co):
-    # Kamera-Pose in Weltkoordinaten: inverse(object->camera)
-    T_wc = np.linalg.inv(T)
-    cn = scene.add(cam,   pose=T_wc)
-    ln = scene.add(light, pose=T_wc)
-    color, _ = renderer.render(scene)
+    # Kamera-Pose in Welt (Welt = Objektkoords): T_cw = inv(T_co)
+    T_cw_cv  = np.linalg.inv(T)
+    # nach OpenGL konvertieren (Pose gilt in PyRender als camera->world)
+    T_cw_gl  = T_cw_cv @ C
+
+    cn = scene.add(cam,   pose=T_cw_gl)
+    ln = scene.add(light, pose=T_cw_gl)
+    color, depth = renderer.render(scene)
+
+    # einfache Sichtbarkeitsprüfung (nicht-Background-Pixel)
+    if not dbg_written:
+        # Depth normalisiert speichern (nur 1x zur Kontrolle)
+        d = depth.copy()
+        finite = np.isfinite(d)
+        if finite.any():
+            dmin, dmax = d[finite].min(), d[finite].max()
+            dn = np.zeros_like(d, dtype=np.float32)
+            if dmax > dmin:
+                dn[finite] = (d[finite]-dmin)/(dmax-dmin)
+            imageio.v2.imwrite(out / f"_debug_depth.png", (255*(1.0-dn)).astype(np.uint8))
+        imageio.v2.imwrite(out / f"_debug_color.png", color)
+        dbg_written = True
+
     imageio.v2.imwrite(out / f"tpl_{i:03d}.png", color)
     scene.remove_node(cn); scene.remove_node(ln)
-    count += 1
+    saved += 1
 
-print(f"Saved {count} templates to {out}")
+print(f"Saved {saved} templates to {out}")
