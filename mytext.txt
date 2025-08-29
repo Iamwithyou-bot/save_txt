@@ -2,83 +2,66 @@ import numpy as np, trimesh, pyrender, imageio
 from pathlib import Path
 
 DATASET = "myObject"
-root   = Path(__file__).resolve().parent
-ply    = root / "gigaPose_datasets" / "datasets" / DATASET / "models" / "obj_000001.ply"
-poses  = root / "gigaPose_datasets" / "datasets" / "templates" / DATASET / "object_poses" / "000001.npy"
-out    = (root / "tmp" / "cnos_templates" / DATASET); out.mkdir(parents=True, exist_ok=True)
+root = Path(__file__).resolve().parent
+ply  = root / "gigaPose_datasets" / "datasets" / DATASET / "models" / "obj_000001.ply"
+out  = (root / "tmp" / "cnos_templates" / DATASET); out.mkdir(parents=True, exist_ok=True)
 
-# --- Szene mit Kontrast ---
 mesh_tm = trimesh.load(ply, force='mesh')
-# sicheres Material (sichtbar), glatte Normals
-mat = pyrender.MetallicRoughnessMaterial(
-    baseColorFactor=(0.85, 0.2, 0.2, 1.0), roughnessFactor=0.9, metallicFactor=0.0
-)
-mesh_pr = pyrender.Mesh.from_trimesh(mesh_tm, smooth=True, material=mat)
-for prim in mesh_pr.primitives: prim.cull_face = None  # doppelseitig
 
+# Material gut sichtbar (rötlich), doppelseitig rendern
+mat = pyrender.MetallicRoughnessMaterial(baseColorFactor=(0.85, 0.2, 0.2, 1.0),
+                                         roughnessFactor=0.9, metallicFactor=0.0)
+mesh_pr = pyrender.Mesh.from_trimesh(mesh_tm, smooth=True, material=mat)
+for prim in mesh_pr.primitives: prim.cull_face = None
+
+# Szene/Bild
+w = h = 512
+fov_deg = 50.0
+fx = fy = w / (2.0 * np.tan(np.deg2rad(fov_deg)/2.0))
+cx = cy = w/2
+cam = pyrender.IntrinsicsCamera(fx, fy, cx, cy, znear=1e-4, zfar=1e4)
 scene = pyrender.Scene(bg_color=[15,15,15,255], ambient_light=[0.35,0.35,0.35,1.0])
 scene.add(mesh_pr)
-
-w = h = 512
-# weiterer Blickwinkel für mehr „Sicherheit“
-fx = fy = 600.0
-cx, cy = w/2, h/2
-cam      = pyrender.IntrinsicsCamera(fx, fy, cx, cy, znear=1e-4, zfar=1e4)
 renderer = pyrender.OffscreenRenderer(w, h)
 
-# 3 Lichter (aus Kamerarichtung + von oben/seitlich)
-key   = pyrender.DirectionalLight(intensity=6.0)
-fill  = pyrender.DirectionalLight(intensity=4.0)
-rim   = pyrender.DirectionalLight(intensity=4.0)
+# Lichter (aus Kamerarichtung + zwei Hilfslichter)
+key  = pyrender.DirectionalLight(intensity=6.0)
+fill = pyrender.DirectionalLight(intensity=4.5)
+rim  = pyrender.DirectionalLight(intensity=4.5)
 
-T_co = np.load(poses)             # (N,4,4) object->camera  (OpenCV)
-C    = np.diag([1,-1,-1,1])       # OpenCV -> OpenGL Achsumklappung
+# Kamera-Posen auf Kugel
+ext = float(max(mesh_tm.extents))
+radius = 2.5*ext + 0.1  # großzügiger Abstand
+elevs = np.linspace(10, 70, 5)              # Grad
+azims = np.arange(0, 360, 20, dtype=float)  # Grad
 
-variants = [
-    ("inv",        lambda T: np.linalg.inv(T)),
-    ("inv@C",      lambda T: np.linalg.inv(T) @ C),
-    ("C@inv",      lambda T: C @ np.linalg.inv(T)),
-    ("C@inv@C",    lambda T: C @ np.linalg.inv(T) @ C),
-    ("raw",        lambda T: T),
-    ("raw@C",      lambda T: T @ C),
-    ("C@raw",      lambda T: C @ T),
-    ("C@raw@C",    lambda T: C @ T @ C),
-]
+def cam_pose(radius, az_deg, el_deg):
+    az = np.deg2rad(az_deg); el = np.deg2rad(el_deg)
+    z = radius*np.sin(el); r = radius*np.cos(el)
+    x = r*np.cos(az); y = r*np.sin(az)
+    c = np.array([x, y, z], dtype=np.float64)
+    f = -c / np.linalg.norm(c)                # Blickrichtung zur Herkunft
+    up = np.array([0,0,1], dtype=np.float64)
+    right = np.cross(f, up); right /= np.linalg.norm(right)
+    up = np.cross(right, f)
+    R = np.stack([right, up, -f], axis=1)     # camera->world
+    M = np.eye(4); M[:3,:3] = R; M[:3,3] = c
+    return M
 
-def render_once(Tpose, save_probe=None):
-    """Render, mehrere Lichter platzieren, RGB (ohne Alpha) zurückgeben."""
-    cn = scene.add(cam, pose=Tpose)
-    ln1 = scene.add(key,  pose=Tpose)
-    # leichte Verschiebungen für fill/rim
-    T_up    = Tpose.copy();  T_up[:3,3]  += np.array([0, 0.2, 0])
-    T_side  = Tpose.copy();  T_side[:3,3]+= np.array([0.2, 0, 0])
-    ln2 = scene.add(fill, pose=T_up)
-    ln3 = scene.add(rim,  pose=T_side)
-    color, depth = renderer.render(scene)
-    scene.remove_node(cn); scene.remove_node(ln1); scene.remove_node(ln2); scene.remove_node(ln3)
-    rgb = color[:, :, :3]  # Alpha verwerfen -> keine weiße Transparenz
-    if save_probe is not None:
-        imageio.v2.imwrite(save_probe, rgb)
-    vr = float(np.isfinite(depth).mean())  # „wie viel“ im Bild ist belegt
-    return vr, rgb
-
-# 1) Beste Pose-Konvention automatisch wählen (auf erstem Pose-Eintrag)
-scores = []
-for name, fn in variants:
-    vr, rgb = render_once(fn(T_co[0]), save_probe=out / f"_probe_{name}.png")
-    scores.append((vr, name))
-scores.sort(reverse=True)
-best_vr, best_name = scores[0]
-print("Beste Variante:", best_name, "sichtbar:", f"{best_vr:.3f}")
-if best_vr < 0.02:
-    print("⚠️ Nichts sichtbar – ggf. fx/fy noch kleiner (z.B. 450) oder Einheiten prüfen.")
-    raise SystemExit(1)
-
-# 2) Alle Templates mit bester Variante rendern
-fn = dict(variants)[best_name]
 count = 0
-for i, T in enumerate(T_co):
-    _, rgb = render_once(fn(T))
-    imageio.v2.imwrite(out / f"tpl_{i:03d}.png", rgb)
-    count += 1
+for el in elevs:
+    for az in azims:
+        T = cam_pose(radius, az, el)
+        cn = scene.add(cam,  pose=T)
+        ln1 = scene.add(key, pose=T)
+        # zwei leichte Versätze für Fill/Rim
+        T_up   = T.copy();   T_up[:3,3]   += np.array([0, 0.2*ext, 0])
+        T_side = T.copy();   T_side[:3,3] += np.array([0.2*ext, 0, 0])
+        ln2 = scene.add(fill, pose=T_up)
+        ln3 = scene.add(rim,  pose=T_side)
+        color, _ = renderer.render(scene)
+        imageio.v2.imwrite(out / f"tpl_el{int(el):02d}_az{int(az):03d}.png", color[:,:,:3])  # RGB ohne Alpha
+        scene.remove_node(cn); scene.remove_node(ln1); scene.remove_node(ln2); scene.remove_node(ln3)
+        count += 1
+
 print(f"Saved {count} templates to {out}")
