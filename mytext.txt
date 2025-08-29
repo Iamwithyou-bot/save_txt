@@ -17,12 +17,15 @@ Set-Location $HOME\novel-pose\pose-live
 # Live starten
 python .\live_gigapose.py
 
-$code = @'
-import os
-from panda3d.core import getModelPath
-print("CWD:", os.getcwd())
-print("Model path:")
-for d in getModelPath().getDirectories():
-    print(" -", d)
-'@
-$code | & "..\envs\gigapose-venv\Scripts\python.exe" -
+# --- Panda3D model-path fix (Windows/relative Pfade) ---
+from pathlib import Path
+from panda3d.core import loadPrcFileData, Filename, getModelPath
+
+ROOT = Path(__file__).resolve().parents[2]  # .../gigapose
+for p in [ROOT, ROOT / "gigaPose_datasets", ROOT / "gigaPose_datasets" / "datasets"]:
+    mp = Filename.from_os_specific(str(p.resolve())).getFullpath()
+    loadPrcFileData('', f"model-path {mp}")
+# Optional: Debug
+# print("P3D model-path:\n", "\n".join(" - "+str(d) for d in getModelPath().getDirectories()))
+# -------------------------------------------------------
+
