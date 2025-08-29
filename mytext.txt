@@ -280,6 +280,24 @@ class Quaternion:
             raise ValueError("Use Quaternion([x,y,z,w]) or Quaternion(x,y,z,w)")
         self._normalize()
 
+    # ---- NEU: öffentliche Normalisierungsmethoden ----
+    def normalize(self):
+        """In-place Normierung (wie im Original)."""
+        self._normalize()
+        return self
+
+    def normalized(self):
+        """Gibt eine normalisierte Kopie zurück."""
+        q = Quaternion(self.x, self.y, self.z, self.w)
+        q._normalize()
+        return q
+
+    def coeffs(self):
+        """Rückgabe in (x,y,z,w)-Reihenfolge (häufig erwartete API)."""
+        return np.array([self.x, self.y, self.z, self.w], dtype=np.float64)
+
+    # ---------------------------------------------------
+
     def _normalize(self):
         n = np.sqrt(self.x**2 + self.y**2 + self.z**2 + self.w**2)
         if n > 0:
@@ -296,9 +314,12 @@ class Quaternion:
             [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)]
         ], dtype=np.float64)
 
-    # Alias wie im Original
-    def toRotationMatrix(self): return self.matrix()
-    def conjugate(self): return Quaternion(-self.x, -self.y, -self.z, self.w)
+    def toRotationMatrix(self):  # Alias wie im Original
+        return self.matrix()
+
+    def conjugate(self):
+        return Quaternion(-self.x, -self.y, -self.z, self.w)
+
 
 class SE3:
     """Minimaler Ersatz für pinocchio.SE3, ausreichend fürs Rendern."""
