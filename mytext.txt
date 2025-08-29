@@ -1,37 +1,58 @@
-
-# Beispiel-Aufruf (PowerShell), äquivalent im Python per subprocess:
-..\envs\cnos-venv\Scripts\python.exe -m src.scripts.inference_custom `
-  --template_dir "$PWD\tmp\cnos_templates" `
-  --rgb_path "<PFAD_ZUM_BILD>" `
-  --stability_score_thresh 0.5
-
-
-
-7)
-
-
-# (falls nicht aktiv) Wrapper-venv aktivieren
-Set-Location $HOME\novel-pose\pose-live
-.\.venv\Scripts\Activate.ps1
-
-# Live starten
-python .\live_gigapose.py
-
-
-# --- Panda3D: headless + model-path ---
+import os
+import numpy as np, trimesh, pyrender, imageio
 from pathlib import Path
-from panda3d.core import loadPrcFileData, Filename, getModelPath
 
-# Headless/offscreen + Software-Fallback (wichtig auf Windows/CI)
-loadPrcFileData('', 'window-type offscreen')
-loadPrcFileData('', 'audio-library-name null')
-loadPrcFileData('', 'aux-display p3tinydisplay')
-loadPrcFileData('', 'framebuffer-software #t')
+DATASET = "myObject"
+root = Path(__file__).resolve().parent
 
-# Repo-Root ermitteln und als Model-Paths registrieren
-ROOT = Path(__file__).resolve().parents[2]  # .../gigapose
-for p in [ROOT, ROOT / "gigaPose_datasets", ROOT / "gigaPose_datasets" / "datasets"]:
-    mp = Filename.from_os_specific(str(p.resolve())).getFullpath()
-    loadPrcFileData('', f'model-path {mp}')
-# --------------------------------------
+# Kandidaten für PLY
+ply_candidates = [
+    root/"gigaPose_datasets/datasets"/DATASET/"models/obj_000001.ply",
+    root/"datasets"/DATASET/"models/obj_000001.ply",
+]
 
+# Kandidaten für object_poses
+poses_candidates = [
+    root/"gigaPose_datasets/datasets/templates"/DATASET/"object_poses/000001.npy",
+    root/"gigaPose_datasets/datasets"/DATASET/"templates"/DATASET/"object_poses/000001.npy",
+    root/"datasets/templates"/DATASET/"object_poses/000001.npy",
+    root/"datasets"/DATASET/"templates"/DATASET/"object_poses/000001.npy",
+]
+
+def first_existing(paths):
+    for p in paths:
+        if p.exists():
+            return p
+    raise FileNotFoundError("None of these paths exist:\n" + "\n".join(str(p) for p in paths))
+
+ply   = first_existing(ply_candidates)
+poses = first_existing(poses_candidates)
+out   = (root/"tmp/cnos_templates"/DATASET); out.mkdir(parents=True, exist_ok=True)
+
+print("PLY  ->", ply)
+print("POSE ->", poses)
+print("OUT  ->", out)
+
+mesh = trimesh.load(ply, force='mesh')
+scene = pyrender.Scene(bg_color=[255,255,255,0], ambient_light=[0.4,0.4,0.4,1.0])
+scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=False))
+
+w = h = 512
+fx = fy = 700.0; cx = cy = w/2
+cam = pyrender.IntrinsicsCamera(fx, fy, cx, cy)
+renderer = pyrender.OffscreenRenderer(w, h)
+light = pyrender.DirectionalLight(intensity=3.0)
+
+T_co = np.load(poses)  # (N,4,4) object->camera
+count = 0
+for i, T in enumerate(T_co):
+    # Kamera-Pose in Weltkoordinaten: inverse(object->camera)
+    T_wc = np.linalg.inv(T)
+    cn = scene.add(cam,   pose=T_wc)
+    ln = scene.add(light, pose=T_wc)
+    color, _ = renderer.render(scene)
+    imageio.v2.imwrite(out / f"tpl_{i:03d}.png", color)
+    scene.remove_node(cn); scene.remove_node(ln)
+    count += 1
+
+print(f"Saved {count} templates to {out}")
