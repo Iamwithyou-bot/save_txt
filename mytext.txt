@@ -240,3 +240,18 @@ Set-Location $HOME\novel-pose\pose-live
 
 # Live starten
 python .\live_gigapose.py
+
+
+
+##############################
+..\envs\gigapose-venv\Scripts\python.exe - << 'PY'
+import os, json, glob
+base = os.path.join(os.getcwd(), "datasets","myObject")
+print("PLYs:", glob.glob(os.path.join(base,"models","obj_*.ply")))
+mi = os.path.join(base,"models_info.json")
+print("models_info exists:", os.path.exists(mi))
+if os.path.exists(mi):
+    d = json.load(open(mi,"r",encoding="utf-8"))
+    print("models_info keys:", list(d.keys()))
+PY
+
