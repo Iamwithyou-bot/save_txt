@@ -18,12 +18,11 @@ Set-Location $HOME\novel-pose\pose-live
 python .\live_gigapose.py
 
 
-# Mini-Diagnose (existiert & lädt?)
-& "..\envs\gigapose-venv\Scripts\python.exe" -c "import os, pathlib, numpy as np, trimesh; \
-print('CWD=',os.getcwd()); \
-p1=pathlib.Path(r'gigaPose_datasets\\datasets\\myObject\\models\\obj_000001.ply'); \
-p2=pathlib.Path(r'gigaPose_datasets\\datasets\\templates\\myObject\\object_poses\\000001.npy'); \
-print('PLY exists',p1.exists(), '->', p1.resolve()); \
-print('NPY exists',p2.exists(), '->', p2.resolve()); \
-m=trimesh.load(p1, force='mesh'); print('mesh ok',hasattr(m,'vertices'), 'verts', len(getattr(m,'vertices',[]))); \
-a=np.load(p2); print('npy shape', a.shape)"
+& "..\envs\gigapose-venv\Scripts\python.exe" - <<'PY'
+import os
+from panda3d.core import getModelPath
+print("CWD:", os.getcwd())
+print("Model path:")
+for d in getModelPath().getDirectories():
+    print(" -", d)
+PY
