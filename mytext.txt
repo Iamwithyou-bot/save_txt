@@ -247,7 +247,49 @@ python .\live_gigapose.py
 
 import numpy as np
 
+class Quaternion:
+    """Minimaler Ersatz für pinocchio.Quaternion.
+    Erwartet Standard-Order (x, y, z, w)."""
+    def __init__(self, *args):
+        if len(args) == 1:
+            q = np.asarray(args[0], dtype=np.float64).reshape(-1)
+            if q.size != 4:
+                raise ValueError("Quaternion needs 4 coefficients (x,y,z,w)")
+            self.x, self.y, self.z, self.w = q.tolist()
+        elif len(args) == 4:
+            self.x, self.y, self.z, self.w = map(float, args)
+        else:
+            raise ValueError("Quaternion(*args): use ([x,y,z,w]) or (x,y,z,w)")
+        self._normalize()
+
+    def _normalize(self):
+        n = np.sqrt(self.x**2 + self.y**2 + self.z**2 + self.w**2)
+        if n > 0:
+            self.x /= n; self.y /= n; self.z /= n; self.w /= n
+
+    def matrix(self):
+        """3x3 Rotationsmatrix zurückgeben (wie pinocchio.Quaternion.matrix())."""
+        x, y, z, w = self.x, self.y, self.z, self.w
+        xx, yy, zz = x*x, y*y, z*z
+        xy, xz, yz = x*y, x*z, y*z
+        wx, wy, wz = w*x, w*y, w*z
+        R = np.array([
+            [1 - 2*(yy + zz),     2*(xy - wz),         2*(xz + wy)],
+            [2*(xy + wz),         1 - 2*(xx + zz),     2*(yz - wx)],
+            [2*(xz - wy),         2*(yz + wx),         1 - 2*(xx + yy)]
+        ], dtype=np.float64)
+        return R
+
+    # Alias wie im Original
+    def toRotationMatrix(self):
+        return self.matrix()
+
+    def conjugate(self):
+        return Quaternion(-self.x, -self.y, -self.z, self.w)
+
+
 class SE3:
+    """Minimaler Ersatz für pinocchio.SE3, ausreichend für das Rendern."""
     def __init__(self, R=None, t=None, M=None):
         if M is not None:
             M = np.asarray(M, dtype=np.float64)
@@ -282,4 +324,3 @@ class SE3:
     def translation(self): return self.M[:3, 3]
     def rotation(self):    return self.M[:3, :3]
     def toHomogeneousMatrix(self): return self.M
-
