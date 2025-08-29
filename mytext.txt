@@ -18,11 +18,4 @@ Set-Location $HOME\novel-pose\pose-live
 python .\live_gigapose.py
 
 
-& "..\envs\gigapose-venv\Scripts\python.exe" - <<'PY'
-import os
-from panda3d.core import getModelPath
-print("CWD:", os.getcwd())
-print("Model path:")
-for d in getModelPath().getDirectories():
-    print(" -", d)
-PY
+& "..\envs\gigapose-venv\Scripts\python.exe" -c "import os; from panda3d.core import getModelPath; print('CWD:', os.getcwd()); print('Model path:'); print(''.join(' - '+str(d)+'`n' for d in getModelPath().getDirectories()))"
