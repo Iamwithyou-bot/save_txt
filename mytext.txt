@@ -1,84 +1,72 @@
-import os
 import numpy as np, trimesh, pyrender, imageio
 from pathlib import Path
 
-# ---------- Pfade ----------
 DATASET = "myObject"
-root = Path(__file__).resolve().parent
-ply   = root / "gigaPose_datasets" / "datasets" / DATASET / "models" / "obj_000001.ply"
-poses = root / "gigaPose_datasets" / "datasets" / "templates" / DATASET / "object_poses" / "000001.npy"
-out   = (root / "tmp" / "cnos_templates" / DATASET); out.mkdir(parents=True, exist_ok=True)
+root   = Path(__file__).resolve().parent
+ply    = root / "gigaPose_datasets" / "datasets" / DATASET / "models" / "obj_000001.ply"
+poses  = root / "gigaPose_datasets" / "datasets" / "templates" / DATASET / "object_poses" / "000001.npy"
+out    = (root / "tmp" / "cnos_templates" / DATASET); out.mkdir(parents=True, exist_ok=True)
 
-# ---------- Laden ----------
+# --- Szene ---
 mesh_tm = trimesh.load(ply, force='mesh')
-T_co = np.load(poses)  # (N,4,4) object->camera (OpenCV)
-print("Mesh extents:", mesh_tm.extents, "verts:", len(mesh_tm.vertices), "poses:", len(T_co))
-
-# ---------- Szene ----------
-scene = pyrender.Scene(bg_color=[20,20,20,255], ambient_light=[0.4,0.4,0.4,1.0])
+scene   = pyrender.Scene(bg_color=[255,255,255,0], ambient_light=[0.6,0.6,0.6,1.0])
 mesh_pr = pyrender.Mesh.from_trimesh(mesh_tm, smooth=False)
-for prim in mesh_pr.primitives: prim.cull_face = None  # kein Backface-Culling
+for prim in mesh_pr.primitives:
+    prim.cull_face = None  # kein Backface-Culling
 scene.add(mesh_pr)
 
-w = h = 640
+w = h = 512
 fx = fy = 900.0
-cx = w/2; cy = h/2
-cam = pyrender.IntrinsicsCamera(fx, fy, cx, cy, znear=1e-5, zfar=1e5)
+cx, cy = w/2, h/2
+cam      = pyrender.IntrinsicsCamera(fx, fy, cx, cy, znear=1e-4, zfar=1e4)
 renderer = pyrender.OffscreenRenderer(w, h)
-light = pyrender.DirectionalLight(intensity=7.0)
+light    = pyrender.DirectionalLight(intensity=10.0)
 
-# ---------- Hilfen ----------
-C = np.diag([1,-1,-1,1])     # OpenCV -> OpenGL Flip
-def save_pair(img, depth, path_stem: Path):
-    # Tiefen-Normalisierung (Inf bleibt weiß)
-    d = depth.copy()
-    mask = np.isfinite(d)
-    if mask.any():
-        dmin, dmax = d[mask].min(), d[mask].max()
-        dn = np.zeros_like(d, dtype=np.float32)
-        if dmax > dmin: dn[mask] = (d[mask]-dmin)/(dmax-dmin)
-        depth_vis = (255*(1.0-dn)).astype(np.uint8)
-    else:
-        depth_vis = np.full(d.shape, 255, np.uint8)
-    imageio.v2.imwrite(str(path_stem)+".png", img)
-    imageio.v2.imwrite(str(path_stem)+"_depth.png", depth_vis)
+T_co = np.load(poses)  # (N,4,4)  object->camera (wahrscheinlich OpenCV)
+C    = np.diag([1, -1, -1, 1])   # OpenCV -> OpenGL Achsumklappung
 
-def look_at(z_dist):
-    """Sanity-Kamera vor dem Objekt auf +Z, blickt zur Herkunft."""
-    T = np.eye(4); T[:3,3] = [0,0,z_dist]
-    # Pyrender erwartet camera->world; so blickt die Cam entlang -Z auf den Ursprung
-    return T
-
-# ---------- Sanity-Shot: feste Kamera ----------
-z = float(max(mesh_tm.extents)*3.0 + 0.1)
-cn = scene.add(cam, pose=look_at(z))
-ln = scene.add(light, pose=look_at(z))
-color, depth = renderer.render(scene)
-save_pair(color, depth, out / "_sanity_fixed")
-scene.remove_node(cn); scene.remove_node(ln)
-print("Wrote sanity:", out/"_sanity_fixed.png")
-
-# ---------- Varianten testen ----------
 variants = [
-    ("v0_Twc",            lambda Tco: np.linalg.inv(Tco)),
-    ("v1_Twc_atC_right",  lambda Tco: np.linalg.inv(Tco) @ C),
-    ("v2_Twc_atC_left",   lambda Tco: C @ np.linalg.inv(Tco)),
-    ("v3_Twc_sandwich",   lambda Tco: C @ np.linalg.inv(Tco) @ C),
+    ("inv",        lambda T: np.linalg.inv(T)),
+    ("inv@C",      lambda T: np.linalg.inv(T) @ C),
+    ("C@inv",      lambda T: C @ np.linalg.inv(T)),
+    ("C@inv@C",    lambda T: C @ np.linalg.inv(T) @ C),
+    # falls T_co eigentlich camera->object ist, probieren wir auch "raw":
+    ("raw",        lambda T: T),
+    ("raw@C",      lambda T: T @ C),
+    ("C@raw",      lambda T: C @ T),
+    ("C@raw@C",    lambda T: C @ T @ C),
 ]
 
-N = min(6, len(T_co))  # nur einige Debug-Frames
-for name, fn in variants:
-    var_dir = out / f"_debug_{name}"
-    var_dir.mkdir(parents=True, exist_ok=True)
-    wrote_any = False
-    for i in range(N):
-        T = fn(T_co[i])
-        cn = scene.add(cam,   pose=T)
-        ln = scene.add(light, pose=T)
-        color, depth = renderer.render(scene)
-        save_pair(color, depth, var_dir / f"tpl_{i:03d}")
-        scene.remove_node(cn); scene.remove_node(ln)
-        wrote_any = True
-    if wrote_any: print("Wrote", N, "frames to", var_dir)
+def visible_ratio(Tpose):
+    cn = scene.add(cam, pose=Tpose); ln = scene.add(light, pose=Tpose)
+    color, depth = renderer.render(scene)
+    scene.remove_node(cn); scene.remove_node(ln)
+    vr = float(np.isfinite(depth).mean())
+    return vr, color
 
-print("Done. Inspect folders starting with _debug_... and the _sanity_fixed.png.")
+# 1) beste Variante anhand des ersten Poses schätzen
+scores = []
+for name, fn in variants:
+    vr, probe = visible_ratio(fn(T_co[0]))
+    imageio.v2.imwrite(out / f"_probe_{name}.png", probe)
+    scores.append((vr, name))
+scores.sort(reverse=True)
+best_vr, best_name = scores[0]
+print("Beste Variante:", best_name, "sichtbar:", f"{best_vr:.3f}")
+
+if best_vr < 0.01:
+    print("⚠️ Keine Variante sieht das Objekt. Versuche fx/fy kleiner (z.B. 600) oder prüfe die Einheiten.")
+    raise SystemExit(1)
+
+# 2) alle Templates mit der besten Variante rendern
+fn = dict(variants)[best_name]
+count = 0
+for i, T in enumerate(T_co):
+    Tpose = fn(T)
+    cn = scene.add(cam, pose=Tpose); ln = scene.add(light, pose=Tpose)
+    color, depth = renderer.render(scene)
+    imageio.v2.imwrite(out / f"tpl_{i:03d}.png", color)
+    scene.remove_node(cn); scene.remove_node(ln)
+    count += 1
+
+print(f"Saved {count} templates to {out}")
