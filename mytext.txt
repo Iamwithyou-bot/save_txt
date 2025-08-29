@@ -7,66 +7,78 @@ ply    = root / "gigaPose_datasets" / "datasets" / DATASET / "models" / "obj_000
 poses  = root / "gigaPose_datasets" / "datasets" / "templates" / DATASET / "object_poses" / "000001.npy"
 out    = (root / "tmp" / "cnos_templates" / DATASET); out.mkdir(parents=True, exist_ok=True)
 
-# --- Szene ---
+# --- Szene mit Kontrast ---
 mesh_tm = trimesh.load(ply, force='mesh')
-scene   = pyrender.Scene(bg_color=[255,255,255,0], ambient_light=[0.6,0.6,0.6,1.0])
-mesh_pr = pyrender.Mesh.from_trimesh(mesh_tm, smooth=False)
-for prim in mesh_pr.primitives:
-    prim.cull_face = None  # kein Backface-Culling
+# sicheres Material (sichtbar), glatte Normals
+mat = pyrender.MetallicRoughnessMaterial(
+    baseColorFactor=(0.85, 0.2, 0.2, 1.0), roughnessFactor=0.9, metallicFactor=0.0
+)
+mesh_pr = pyrender.Mesh.from_trimesh(mesh_tm, smooth=True, material=mat)
+for prim in mesh_pr.primitives: prim.cull_face = None  # doppelseitig
+
+scene = pyrender.Scene(bg_color=[15,15,15,255], ambient_light=[0.35,0.35,0.35,1.0])
 scene.add(mesh_pr)
 
 w = h = 512
-fx = fy = 900.0
+# weiterer Blickwinkel für mehr „Sicherheit“
+fx = fy = 600.0
 cx, cy = w/2, h/2
 cam      = pyrender.IntrinsicsCamera(fx, fy, cx, cy, znear=1e-4, zfar=1e4)
 renderer = pyrender.OffscreenRenderer(w, h)
-light    = pyrender.DirectionalLight(intensity=10.0)
 
-T_co = np.load(poses)  # (N,4,4)  object->camera (wahrscheinlich OpenCV)
-C    = np.diag([1, -1, -1, 1])   # OpenCV -> OpenGL Achsumklappung
+# 3 Lichter (aus Kamerarichtung + von oben/seitlich)
+key   = pyrender.DirectionalLight(intensity=6.0)
+fill  = pyrender.DirectionalLight(intensity=4.0)
+rim   = pyrender.DirectionalLight(intensity=4.0)
+
+T_co = np.load(poses)             # (N,4,4) object->camera  (OpenCV)
+C    = np.diag([1,-1,-1,1])       # OpenCV -> OpenGL Achsumklappung
 
 variants = [
     ("inv",        lambda T: np.linalg.inv(T)),
     ("inv@C",      lambda T: np.linalg.inv(T) @ C),
     ("C@inv",      lambda T: C @ np.linalg.inv(T)),
     ("C@inv@C",    lambda T: C @ np.linalg.inv(T) @ C),
-    # falls T_co eigentlich camera->object ist, probieren wir auch "raw":
     ("raw",        lambda T: T),
     ("raw@C",      lambda T: T @ C),
     ("C@raw",      lambda T: C @ T),
     ("C@raw@C",    lambda T: C @ T @ C),
 ]
 
-def visible_ratio(Tpose):
-    cn = scene.add(cam, pose=Tpose); ln = scene.add(light, pose=Tpose)
+def render_once(Tpose, save_probe=None):
+    """Render, mehrere Lichter platzieren, RGB (ohne Alpha) zurückgeben."""
+    cn = scene.add(cam, pose=Tpose)
+    ln1 = scene.add(key,  pose=Tpose)
+    # leichte Verschiebungen für fill/rim
+    T_up    = Tpose.copy();  T_up[:3,3]  += np.array([0, 0.2, 0])
+    T_side  = Tpose.copy();  T_side[:3,3]+= np.array([0.2, 0, 0])
+    ln2 = scene.add(fill, pose=T_up)
+    ln3 = scene.add(rim,  pose=T_side)
     color, depth = renderer.render(scene)
-    scene.remove_node(cn); scene.remove_node(ln)
-    vr = float(np.isfinite(depth).mean())
-    return vr, color
+    scene.remove_node(cn); scene.remove_node(ln1); scene.remove_node(ln2); scene.remove_node(ln3)
+    rgb = color[:, :, :3]  # Alpha verwerfen -> keine weiße Transparenz
+    if save_probe is not None:
+        imageio.v2.imwrite(save_probe, rgb)
+    vr = float(np.isfinite(depth).mean())  # „wie viel“ im Bild ist belegt
+    return vr, rgb
 
-# 1) beste Variante anhand des ersten Poses schätzen
+# 1) Beste Pose-Konvention automatisch wählen (auf erstem Pose-Eintrag)
 scores = []
 for name, fn in variants:
-    vr, probe = visible_ratio(fn(T_co[0]))
-    imageio.v2.imwrite(out / f"_probe_{name}.png", probe)
+    vr, rgb = render_once(fn(T_co[0]), save_probe=out / f"_probe_{name}.png")
     scores.append((vr, name))
 scores.sort(reverse=True)
 best_vr, best_name = scores[0]
 print("Beste Variante:", best_name, "sichtbar:", f"{best_vr:.3f}")
-
-if best_vr < 0.01:
-    print("⚠️ Keine Variante sieht das Objekt. Versuche fx/fy kleiner (z.B. 600) oder prüfe die Einheiten.")
+if best_vr < 0.02:
+    print("⚠️ Nichts sichtbar – ggf. fx/fy noch kleiner (z.B. 450) oder Einheiten prüfen.")
     raise SystemExit(1)
 
-# 2) alle Templates mit der besten Variante rendern
+# 2) Alle Templates mit bester Variante rendern
 fn = dict(variants)[best_name]
 count = 0
 for i, T in enumerate(T_co):
-    Tpose = fn(T)
-    cn = scene.add(cam, pose=Tpose); ln = scene.add(light, pose=Tpose)
-    color, depth = renderer.render(scene)
-    imageio.v2.imwrite(out / f"tpl_{i:03d}.png", color)
-    scene.remove_node(cn); scene.remove_node(ln)
+    _, rgb = render_once(fn(T))
+    imageio.v2.imwrite(out / f"tpl_{i:03d}.png", rgb)
     count += 1
-
 print(f"Saved {count} templates to {out}")
