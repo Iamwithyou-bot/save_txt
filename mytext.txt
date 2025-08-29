@@ -18,20 +18,20 @@ Set-Location $HOME\novel-pose\pose-live
 python .\live_gigapose.py
 
 
-# --- Panda3D headless + Modelpfade fixen ---
+# --- Panda3D: headless + model-path ---
 from pathlib import Path
 from panda3d.core import loadPrcFileData, Filename, getModelPath
 
-# Headless/offscreen sicher einschalten (vor ShowBase!)
+# Headless/offscreen + Software-Fallback (wichtig auf Windows/CI)
 loadPrcFileData('', 'window-type offscreen')
 loadPrcFileData('', 'audio-library-name null')
-# Software-Fallback, falls kein GL verfügbar:
 loadPrcFileData('', 'aux-display p3tinydisplay')
 loadPrcFileData('', 'framebuffer-software #t')
 
-# Repo-Root ermitteln und als Modelpfad registrieren
+# Repo-Root ermitteln und als Model-Paths registrieren
 ROOT = Path(__file__).resolve().parents[2]  # .../gigapose
 for p in [ROOT, ROOT / "gigaPose_datasets", ROOT / "gigaPose_datasets" / "datasets"]:
     mp = Filename.from_os_specific(str(p.resolve())).getFullpath()
     loadPrcFileData('', f'model-path {mp}')
-# --------------------------------------------
+# --------------------------------------
+
