@@ -1,227 +1,3 @@
-# tools/stl2bop.py
-#!/usr/bin/env python3
-import argparse, json, numpy as np, trimesh
-from pathlib import Path
-
-def approx_diameter(verts: np.ndarray) -> float:
-    V = verts.astype(np.float64)
-    if V.size == 0:
-        return 0.0
-    idx = np.random.choice(len(V), min(4096, len(V)), replace=False)
-    S = V[idx]
-    p = S[np.random.randint(len(S))]
-    for _ in range(2):
-        d = np.linalg.norm(S - p, axis=1)
-        p = S[np.argmax(d)]
-    q = S[np.argmax(np.linalg.norm(S - p, axis=1))]
-    return float(np.linalg.norm(p - q))
-
-def remove_degenerate_and_duplicates(mesh: trimesh.Trimesh):
-    # 1) Degenerate Faces -> update_faces(nondegenerate_faces)
-    nd = mesh.nondegenerate_faces()
-    if getattr(nd, "dtype", None) is not bool:   # indices -> bool mask
-        mask = np.zeros(len(mesh.faces), dtype=bool)
-        mask[nd] = True
-    else:
-        mask = nd
-    mesh.update_faces(mask)
-
-    # 2) Doppelte Faces optional entfernen
-    try:
-        uniq = mesh.unique_faces()  # bool mask
-        if len(uniq) == len(mesh.faces):
-            mesh.update_faces(uniq)
-    except Exception:
-        pass
-
-    # 3) Verwaiste Vertices entfernen
-    mesh.remove_unreferenced_vertices()
-
-    # 4) (Optional) Nahe Vertices mergen
-    try:
-        mesh.merge_vertices()  # toleranzbasiert; ok zu behalten
-    except Exception:
-        pass
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("stl_path", type=Path)
-    ap.add_argument("--out_root", type=Path, required=True)  # ..\gigapose\datasets\myObject
-    ap.add_argument("--units", choices=["mm","m"], default="mm",
-                    help="STL hat keine Einheiten; meistens mm. 'mm' -> Skaliert ×0.001 auf Meter.")
-    args = ap.parse_args()
-
-    scale = 0.001 if args.units == "mm" else 1.0
-    mesh = trimesh.load(args.stl_path, force='mesh')
-    if not isinstance(mesh, trimesh.Trimesh):
-        raise ValueError("STL enthält keine einzelne Trimesh-Geometrie.")
-
-    # Grundreinigung + Normierung
-    remove_degenerate_and_duplicates(mesh)
-    mesh.rezero()
-    if scale != 1.0:
-        mesh.apply_scale(scale)  # -> Meter
-
-    # Exportpfade
-    out_models = args.out_root / "models"
-    out_models.mkdir(parents=True, exist_ok=True)
-    ply_path = out_models / "obj_000001.ply"
-
-    # Export (PLY binär, mit Normals)
-    mesh.export(ply_path, file_type="ply")
-
-    # models_info.json schreiben (Meter)
-    V = mesh.vertices
-    mn, mx = V.min(axis=0), V.max(axis=0)
-    size = mx - mn
-    diam = approx_diameter(V)
-    models_info = {
-        "1": {
-            "name": "obj_000001",
-            "diameter": float(diam),
-            "min_x": float(mn[0]), "min_y": float(mn[1]), "min_z": float(mn[2]),
-            "size_x": float(size[0]), "size_y": float(size[1]), "size_z": float(size[2]),
-        }
-    }
-    (args.out_root / "models_info.json").write_text(json.dumps(models_info, indent=2), encoding="utf-8")
-
-    print("Exportiert:", ply_path)
-    print("Größe [m]:", size.tolist(), "Durchmesser [m]:", diam)
-
-if __name__ == "__main__":
-    main()
-
-4.1
-
-
-# Beispiel: Dein STL liegt in D:\assets\obj.stl
-python .\tools\stl2bop.py "D:\assets\dein_model.stl" `
-  --out_root "..\gigapose\datasets\myObject" `
-  --units mm
-
-
-5)
-
-Set-Location $HOME\novel-pose\gigapose
-..\envs\gigapose-venv\Scripts\python.exe -m src.scripts.render_custom_templates custom_dataset_name=myObject
-
-
-..\envs\gigapose-venv\Scripts\python.exe -m src.scripts.render_bop_templates test_dataset_name=myObject
-
-
-
-6)
-
-
-Set-Location $HOME\novel-pose\pose-live
-@'
-import os, json, time, subprocess, cv2, numpy as np
-from pathlib import Path
-
-def read_env(path):
-    env = {}
-    p = Path(path)
-    if p.exists():
-        for line in p.read_text().splitlines():
-            if not line.strip() or line.strip().startswith("#"): continue
-            k, _, v = line.partition("=")
-            env[k.strip()] = v.strip()
-    return env
-
-ENV = read_env(".env")
-GIGAPOSE_ROOT = Path(ENV.get("GIGAPOSE_ROOT","..\\gigapose")).resolve()
-CNOS_ROOT     = Path(ENV.get("CNOS_ROOT","..\\cnos")).resolve()
-GIGAPOSE_PY   = str(Path(ENV.get("GIGAPOSE_PY","..\\envs\\gigapose-venv\\Scripts\\python.exe")).resolve())
-CNOS_PY       = str(Path(ENV.get("CNOS_PY","..\\envs\\cnos-venv\\Scripts\\python.exe")).resolve())
-DATASET       = ENV.get("DATASET","myObject")
-
-# TODO: echte Kalibrierung eintragen:
-fx, fy, cx, cy = 900.0, 900.0, 640.0, 360.0
-K = [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-OBJ_ID = 1
-
-def write_bop_single(root: Path, frame_bgr, img_id: int):
-    ds = root / "datasets" / DATASET
-    scene = ds / "test" / "000000"
-    rgbdir = scene / "rgb"
-    rgbdir.mkdir(parents=True, exist_ok=True)
-    img_fn = f"{img_id:06d}.png"
-    cv2.imwrite(str(rgbdir / img_fn), frame_bgr)
-    (scene / "scene_camera.json").write_text(json.dumps({f"{img_id}":{"cam_K": K, "depth_scale":1.0}}))
-    (ds / "test_targets_bop19.json").write_text(json.dumps([{"im_id": img_id, "obj_id": OBJ_ID, "scene_id": 0}]))
-    return rgbdir / img_fn
-
-def run_gigapose_coarse():
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(GIGAPOSE_ROOT)
-    subprocess.run(
-        [GIGAPOSE_PY, "test.py", f"test_dataset_name={DATASET}", "run_id=live", "test_setting=detection"],
-        cwd=str(GIGAPOSE_ROOT), env=env, check=True
-    )
-
-def draw_axes(img, R, t, Kmat, axis_len=0.05):
-    rvec, _ = cv2.Rodrigues(R.astype(np.float64))
-    axes = np.float32([[0,0,0],[axis_len,0,0],[0,axis_len,0],[0,0,axis_len]])
-    proj, _ = cv2.projectPoints(axes, rvec, t.reshape(3,1), Kmat, None)
-    p0, px, py, pz = proj.reshape(-1,2).astype(int)
-    cv2.line(img, tuple(p0), tuple(px),  (0,0,255), 2)
-    cv2.line(img, tuple(p0), tuple(py),  (0,255,0), 2)
-    cv2.line(img, tuple(p0), tuple(pz),  (255,0,0), 2)
-
-def latest_prediction_csv():
-    out = GIGAPOSE_ROOT / "output"
-    if not out.exists(): return None
-    cand = sorted(out.rglob("predictions.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return cand[0] if cand else None
-
-def parse_first_pose(csv_path):
-    import csv
-    with open(csv_path) as f:
-        for row in csv.reader(f, delimiter=','):
-            R = np.array(list(map(float, row[4:13]))).reshape(3,3)
-            t = np.array(list(map(float, row[13:16])))
-            score = float(row[3])
-            return R, t, score
-    return None
-
-def main():
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # DirectShow hilft oft unter Windows
-    Kmat = np.array([[fx,0,cx],[0,fy,cy],[0,0,1]], dtype=np.float64)
-    i = 0
-    while True:
-        ok, frame = cap.read()
-        if not ok: break
-        cv2.imshow("Live", frame)
-        key = cv2.waitKey(1) & 0xFF
-
-        if i % 10 == 0 or key == ord('p'):
-            _ = write_bop_single(GIGAPOSE_ROOT, frame, i)
-            t0 = time.time()
-            run_gigapose_coarse()
-            dt = time.time() - t0
-            csv_path = latest_prediction_csv()
-            if csv_path:
-                pose = parse_first_pose(csv_path)
-                if pose:
-                    R, t, score = pose
-                    vis = frame.copy()
-                    draw_axes(vis, R, t, Kmat, axis_len=0.05)
-                    cv2.putText(vis, f"score={score:.3f}  {dt*1000:.0f} ms", (10,30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 2, cv2.LINE_AA)
-                    cv2.imshow("Pose", vis)
-
-        if key == 27: break  # ESC
-        i += 1
-
-    cap.release(); cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
-'@ | Set-Content -Path .\live_gigapose.py -Encoding UTF8
-
-
-
-
 
 # Beispiel-Aufruf (PowerShell), äquivalent im Python per subprocess:
 ..\envs\cnos-venv\Scripts\python.exe -m src.scripts.inference_custom `
@@ -242,81 +18,30 @@ Set-Location $HOME\novel-pose\pose-live
 python .\live_gigapose.py
 
 
+# 1) Sicherstellen, dass du im richtigen Ordner bist
+Get-Location
 
-8)
-import numpy as np
+# 2) Zielordner anlegen
+$models = ".\gigaPose_datasets\datasets\myObject\models"
+$poses  = ".\gigaPose_datasets\datasets\templates\myObject\object_poses"
+New-Item -ItemType Directory -Force -Path $models | Out-Null
+New-Item -ItemType Directory -Force -Path $poses  | Out-Null
 
-def _as_vec3(t):
-    t = np.asarray(t, dtype=np.float64)
-    t = np.squeeze(t)
-    if t.shape == (3,1): t = t[:,0]
-    if t.shape == (1,3): t = t[0,:]
-    return np.asarray(t, dtype=np.float64).reshape(3,)
+# 3) Deine PLY + models_info.json an den erwarteten Ort kopieren
+#    (Passe die QUELL-Pfade an, je nachdem wo deine Dateien aktuell liegen!)
+Copy-Item ".\datasets\myObject\models\obj_000001.ply" $models -Force
+Copy-Item ".\datasets\myObject\models_info.json"       ".\gigaPose_datasets\datasets\myObject\" -Force
 
-def _as_rot3x3(R):
-    R = np.asarray(R, dtype=np.float64)
-    if R.shape != (3,3): raise ValueError("R must be 3x3")
-    return R
+# 4) object_poses-Datei korrekt benennen (beide Varianten anlegen, um alle Codepfade abzudecken)
+#    Wenn du nur 000001.npy hast:
+Copy-Item ".\gigaPose_datasets\datasets\templates\myObject\object_poses\000001.npy" `
+          ".\gigaPose_datasets\datasets\templates\myObject\object_poses\obj_000001.npy" -Force
+#    Falls sie woanders liegt, such sie:
+# Get-ChildItem -Recurse -Include 000001.npy | Select-Object -First 5 FullName
 
-class Quaternion:
-    """Minimaler Ersatz für pinocchio.Quaternion (x,y,z,w)."""
-    def __init__(self, *args):
-        if len(args) == 1:
-            q = np.asarray(args[0], dtype=np.float64).reshape(-1)
-            if q.size != 4: raise ValueError("need 4 coeffs (x,y,z,w)")
-            self.x, self.y, self.z, self.w = q.tolist()
-        elif len(args) == 4:
-            self.x, self.y, self.z, self.w = map(float, args)
-        else:
-            raise ValueError("use Quaternion([x,y,z,w]) or (x,y,z,w)")
-        self._normalize()
+# 5) Existenz prüfen
+Test-Path ".\gigaPose_datasets\datasets\myObject\models\obj_000001.ply"
+Test-Path ".\gigaPose_datasets\datasets\myObject\models_info.json"
+Test-Path ".\gigaPose_datasets\datasets\templates\myObject\object_poses\000001.npy"
+Test-Path ".\gigaPose_datasets\datasets\templates\myObject\object_poses\obj_000001.npy"
 
-    # public API (fehlt sonst oft):
-    def normalize(self): self._normalize(); return self
-    def normalized(self):
-        q = Quaternion(self.x, self.y, self.z, self.w); q._normalize(); return q
-    def coeffs(self): return np.array([self.x, self.y, self.z, self.w], dtype=np.float64)
-
-    def _normalize(self):
-        n = np.sqrt(self.x**2 + self.y**2 + self.z**2 + self.w**2)
-        if n > 0: self.x/=n; self.y/=n; self.z/=n; self.w/=n
-
-    def matrix(self):
-        x,y,z,w = self.x,self.y,self.z,self.w
-        xx,yy,zz = x*x,y*y,z*z; xy,xz,yz = x*y,x*z,y*z; wx,wy,wz = w*x,w*y,w*z
-        return np.array([
-            [1-2*(yy+zz), 2*(xy-wz),   2*(xz+wy)],
-            [2*(xy+wz),   1-2*(xx+zz), 2*(yz-wx)],
-            [2*(xz-wy),   2*(yz+wx),   1-2*(xx+yy)]
-        ], dtype=np.float64)
-
-    def toRotationMatrix(self): return self.matrix()
-    def conjugate(self): return Quaternion(-self.x, -self.y, -self.z, self.w)
-
-# Alias, falls der Upstream-Tippfehler "Quanternion" benutzt wird:
-class Quanternion(Quaternion): pass
-
-class SE3:
-    """Minimaler Ersatz für pinocchio.SE3."""
-    def __init__(self, R=None, t=None, M=None):
-        if M is not None:
-            M = np.asarray(M, dtype=np.float64)
-            if M.shape != (4,4): raise ValueError("M must be 4x4")
-            self.M = M.copy()
-        else:
-            R = np.eye(3) if R is None else _as_rot3x3(R)
-            t = np.zeros(3) if t is None else _as_vec3(t)
-            self.M = np.eye(4, dtype=np.float64)
-            self.M[:3,:3] = R; self.M[:3,3] = t
-    @staticmethod
-    def Identity(): return SE3()
-    @staticmethod
-    def fromHomogeneousMatrix(M): return SE3(M=M)
-    def inverse(self):
-        R,t = self.M[:3,:3], self.M[:3,3]
-        Minv = np.eye(4, dtype=np.float64); Minv[:3,:3] = R.T; Minv[:3,3] = -R.T @ t
-        return SE3(M=Minv)
-    def __mul__(self, other): return SE3(M=self.M @ other.M)
-    def translation(self): return self.M[:3,3]
-    def rotation(self):    return self.M[:3,:3]
-    def toHomogeneousMatrix(self): return self.M
